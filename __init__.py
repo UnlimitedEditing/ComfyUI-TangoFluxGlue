@@ -5,15 +5,13 @@ Graydient runners, so TangoFluxVAEDecodeAndPlay fails after a successful render.
 Replace torchaudio.save with a stdlib-wave writer (16-bit PCM WAV) when torchcodec
 cannot be imported.
 
-Also trim the AUDIO output of TangoFluxVAEDecodeAndPlay to the requested duration (with a 0.5 s fade-out):
-the node only trims the copy it saves itself and returns the full 30 s decode, so a
-downstream SaveAudio would otherwise write the sound followed by silence.
-No nodes are added.
+Adds one node, TangoFluxTrimFade: TangoFluxVAEDecodeAndPlay only trims the copy it saves
+itself and returns the full 30 s decode, so a downstream SaveAudio would write the sound
+followed by silence. TangoFlux also stops hard at the requested duration, so the node
+trims to `duration` and fades out the last `fade_seconds`.
 """
 import importlib.util
 
-NODE_CLASS_MAPPINGS = {}
-NODE_DISPLAY_NAME_MAPPINGS = {}
 
 if importlib.util.find_spec("torchcodec") is None:
     import wave
@@ -33,38 +31,32 @@ if importlib.util.find_spec("torchcodec") is None:
     torchaudio.save = _wav_save
 
 
-FADE_SECONDS = 0.5
+class TangoFluxTrimFade:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "duration": ("INT", {"default": 10, "min": 1, "max": 30, "step": 1}),
+                "fade_seconds": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 5.0, "step": 0.05}),
+            }
+        }
 
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "run"
+    CATEGORY = "TangoFlux"
 
-def _trim_decode_output():
-    import nodes as comfy_nodes
-    import torch
+    def run(self, audio, duration, fade_seconds):
+        import torch
 
-    cls = comfy_nodes.NODE_CLASS_MAPPINGS.get("TangoFluxVAEDecodeAndPlay")
-    if cls is None or getattr(cls, "_tango_trim_patched", False):
-        return
-    orig = cls.play
-
-    def play(self, vae, latents, *args, **kwargs):
-        out = orig(self, vae, latents, *args, **kwargs)
-        audio = out["result"][0]
-        end = int(latents["duration"] * audio["sample_rate"])
-        wave_t = audio["waveform"][..., :end]
-        # TangoFlux ends hard at the requested duration; fade the last 0.5 s so it
-        # does not sound chopped.
-        n = min(int(FADE_SECONDS * audio["sample_rate"]), wave_t.shape[-1])
+        sr = int(audio["sample_rate"])
+        wave_t = audio["waveform"][..., : int(duration * sr)].clone()
+        n = min(int(fade_seconds * sr), wave_t.shape[-1])
         if n > 0:
             ramp = torch.linspace(1.0, 0.0, n, device=wave_t.device, dtype=wave_t.dtype)
-            wave_t = wave_t.clone()
             wave_t[..., -n:] = wave_t[..., -n:] * ramp
-        audio["waveform"] = wave_t
-        return out
-
-    cls.play = play
-    cls._tango_trim_patched = True
+        return ({"waveform": wave_t, "sample_rate": sr},)
 
 
-try:
-    _trim_decode_output()
-except Exception as e:  # never break ComfyUI startup
-    print(f"[TangoFluxGlue] trim patch not applied: {e}")
+NODE_CLASS_MAPPINGS = {"TangoFluxTrimFade": TangoFluxTrimFade}
+NODE_DISPLAY_NAME_MAPPINGS = {"TangoFluxTrimFade": "TangoFlux Trim + Fade"}

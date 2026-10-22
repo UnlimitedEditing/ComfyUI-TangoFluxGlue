@@ -5,7 +5,7 @@ Graydient runners, so TangoFluxVAEDecodeAndPlay fails after a successful render.
 Replace torchaudio.save with a stdlib-wave writer (16-bit PCM WAV) when torchcodec
 cannot be imported.
 
-Also trim the AUDIO output of TangoFluxVAEDecodeAndPlay to the requested duration:
+Also trim the AUDIO output of TangoFluxVAEDecodeAndPlay to the requested duration (with a 0.5 s fade-out):
 the node only trims the copy it saves itself and returns the full 30 s decode, so a
 downstream SaveAudio would otherwise write the sound followed by silence.
 No nodes are added.
@@ -33,8 +33,12 @@ if importlib.util.find_spec("torchcodec") is None:
     torchaudio.save = _wav_save
 
 
+FADE_SECONDS = 0.5
+
+
 def _trim_decode_output():
     import nodes as comfy_nodes
+    import torch
 
     cls = comfy_nodes.NODE_CLASS_MAPPINGS.get("TangoFluxVAEDecodeAndPlay")
     if cls is None or getattr(cls, "_tango_trim_patched", False):
@@ -45,7 +49,15 @@ def _trim_decode_output():
         out = orig(self, vae, latents, *args, **kwargs)
         audio = out["result"][0]
         end = int(latents["duration"] * audio["sample_rate"])
-        audio["waveform"] = audio["waveform"][..., :end]
+        wave_t = audio["waveform"][..., :end]
+        # TangoFlux ends hard at the requested duration; fade the last 0.5 s so it
+        # does not sound chopped.
+        n = min(int(FADE_SECONDS * audio["sample_rate"]), wave_t.shape[-1])
+        if n > 0:
+            ramp = torch.linspace(1.0, 0.0, n, device=wave_t.device, dtype=wave_t.dtype)
+            wave_t = wave_t.clone()
+            wave_t[..., -n:] = wave_t[..., -n:] * ramp
+        audio["waveform"] = wave_t
         return out
 
     cls.play = play
